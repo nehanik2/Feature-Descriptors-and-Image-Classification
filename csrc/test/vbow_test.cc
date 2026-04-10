@@ -1,43 +1,60 @@
 // SYSTEM INCLUDES
-#include <iostream>
 #include <cmath>
-#include <vector>
-#include <algorithm>
+#include <list>
+#include <map>
 #include <set>
+#include <vector>
 
 #include <gtest/gtest.h>
 #include <585/common/types.h>
-#include <585/imgproc/imgproc.h>
 
 // C++ PROJECT INCLUDES
 #include "vbow/vbow.h"
 
 // ============================================================
-//  Helper utilities
+//  Helpers
+//  GrayscaleByteImg = Eigen::Matrix<uint8_t,-1,-1>
+//  ByteDataset      = std::list<GrayscaleByteImg>
+//  FloatDataset     = Eigen::Matrix<float,-1,-1>
+//  ProbVector       = Eigen::VectorXf
 // ============================================================
 
-// Build a tiny synthetic dataset of square images.
-// Each image is `side x side` pixels filled with a constant value.
-static ivc::ByteDataset make_constant_dataset(const std::vector<uint8_t>& fill_values,
-                                               int side = 4)
+// Build a square image filled with a constant value
+static ivc::GrayscaleByteImg make_img(int side, uint8_t val)
+{
+    ivc::GrayscaleByteImg img(side, side);
+    img.fill(val);
+    return img;
+}
+
+// Build a dataset from a list of fill values; all images are side×side
+static ivc::ByteDataset make_dataset(const std::vector<uint8_t>& vals, int side = 4)
 {
     ivc::ByteDataset X;
-    for (uint8_t v : fill_values)
-    {
-        ivc::GrayscaleByteImg img(side * side, v);
-        X.push_back(img);
-    }
+    for (uint8_t v : vals)
+        X.push_back(make_img(side, v));
     return X;
 }
 
-// Create an image with a checkerboard pattern (for richer vocabulary)
-static ivc::GrayscaleByteImg make_checkerboard(int side, uint8_t a = 0, uint8_t b = 255)
+// Build a FloatDataset (N×D) from a std::vector<std::vector<float>>
+static ivc::FloatDataset make_float_ds(const std::vector<std::vector<float>>& rows)
 {
-    ivc::GrayscaleByteImg img(side * side);
-    for (int r = 0; r < side; ++r)
-        for (int c = 0; c < side; ++c)
-            img[r * side + c] = ((r + c) % 2 == 0) ? a : b;
-    return img;
+    int N = static_cast<int>(rows.size());
+    int D = N > 0 ? static_cast<int>(rows[0].size()) : 0;
+    ivc::FloatDataset M(N, D);
+    for (int i = 0; i < N; ++i)
+        for (int j = 0; j < D; ++j)
+            M(i, j) = rows[static_cast<size_t>(i)][static_cast<size_t>(j)];
+    return M;
+}
+
+// Build a ProbVector from std::vector<float>
+static ivc::ProbVector make_prob(const std::vector<float>& v)
+{
+    ivc::ProbVector p(static_cast<Eigen::Index>(v.size()));
+    for (Eigen::Index i = 0; i < p.size(); ++i)
+        p(i) = v[static_cast<size_t>(i)];
+    return p;
 }
 
 // ============================================================
@@ -47,32 +64,29 @@ static ivc::GrayscaleByteImg make_checkerboard(int side, uint8_t a = 0, uint8_t 
 TEST(test_vocab, add_unique)
 {
     ivc::student::Vocab vocab;
-    ivc::GrayscaleByteImg p1 = {1, 2, 3, 4};
-    ivc::GrayscaleByteImg p2 = {5, 6, 7, 8};
-
+    ivc::GrayscaleByteImg p1 = make_img(2, 10);
+    ivc::GrayscaleByteImg p2 = make_img(2, 20);
     vocab.add(p1);
     vocab.add(p2);
     EXPECT_EQ(vocab.size(), 2u);
 }
 
-TEST(test_vocab, add_duplicate)
+TEST(test_vocab, add_duplicate_no_grow)
 {
     ivc::student::Vocab vocab;
-    ivc::GrayscaleByteImg p1 = {1, 2, 3, 4};
-
-    vocab.add(p1);
-    vocab.add(p1);   // should NOT grow
-    vocab.add(p1);
+    ivc::GrayscaleByteImg p = make_img(2, 42);
+    vocab.add(p);
+    vocab.add(p);
+    vocab.add(p);
     EXPECT_EQ(vocab.size(), 1u);
 }
 
-TEST(test_vocab, ordered_elements_order)
+TEST(test_vocab, ordered_elements_insertion_order)
 {
     ivc::student::Vocab vocab;
-    // Add three distinct patches
-    ivc::GrayscaleByteImg p0 = {10, 10};
-    ivc::GrayscaleByteImg p1 = {20, 20};
-    ivc::GrayscaleByteImg p2 = {30, 30};
+    ivc::GrayscaleByteImg p0 = make_img(2, 10);
+    ivc::GrayscaleByteImg p1 = make_img(2, 20);
+    ivc::GrayscaleByteImg p2 = make_img(2, 30);
 
     vocab.add(p0);
     vocab.add(p1);
@@ -81,34 +95,27 @@ TEST(test_vocab, ordered_elements_order)
     auto elems = vocab.ordered_elements();
     ASSERT_EQ(elems.size(), 3u);
 
-    // Elements must come back in insertion-index order
     auto it = elems.begin();
-    EXPECT_EQ(*it, p0); ++it;
-    EXPECT_EQ(*it, p1); ++it;
-    EXPECT_EQ(*it, p2);
+    EXPECT_TRUE((*it).isApprox(p0)); ++it;
+    EXPECT_TRUE((*it).isApprox(p1)); ++it;
+    EXPECT_TRUE((*it).isApprox(p2));
 }
 
 TEST(test_vocab, ordered_elements_deterministic)
 {
-    // Two vocabs built with the same patches in same order must
-    // return identical ordered_elements lists.
     ivc::student::Vocab v1, v2;
-    std::vector<ivc::GrayscaleByteImg> patches = {
-        {1,2,3}, {4,5,6}, {7,8,9}
-    };
-    for (auto& p : patches) { v1.add(p); v2.add(p); }
+    ivc::GrayscaleByteImg pa = make_img(2, 1);
+    ivc::GrayscaleByteImg pb = make_img(2, 2);
+    ivc::GrayscaleByteImg pc = make_img(2, 3);
+
+    for (auto* v : {&v1, &v2}) { v->add(pa); v->add(pb); v->add(pc); }
 
     auto e1 = v1.ordered_elements();
     auto e2 = v2.ordered_elements();
     ASSERT_EQ(e1.size(), e2.size());
 
-    auto it1 = e1.begin();
-    auto it2 = e2.begin();
-    while (it1 != e1.end())
-    {
-        EXPECT_EQ(*it1, *it2);
-        ++it1; ++it2;
-    }
+    auto it1 = e1.begin(), it2 = e2.begin();
+    while (it1 != e1.end()) { EXPECT_TRUE(it1->isApprox(*it2)); ++it1; ++it2; }
 }
 
 TEST(test_vocab, empty_vocab)
@@ -124,54 +131,49 @@ TEST(test_vocab, empty_vocab)
 
 TEST(test_binary_vbow, output_dimensions)
 {
-    // 3 train images, 2 test images — 4x4 pixels, patch_size=2
-    auto X_train = make_constant_dataset({0, 128, 255}, 4);
-    auto X_test  = make_constant_dataset({0, 255},      4);
-
+    auto X_train = make_dataset({0, 128, 255}, 4);
+    auto X_test  = make_dataset({0, 255},      4);
     ivc::student::BinaryBagOfWords bow(X_train, 2);
     auto D = bow.transform(X_test);
 
-    ASSERT_EQ(D.size(), 2u);       // 2 test images
-    // vocab size > 0
-    EXPECT_GT(D[0].size(), 0u);
+    // 2 test images, V columns
+    EXPECT_EQ(D.rows(), 2);
+    EXPECT_GT(D.cols(), 0);
 }
 
 TEST(test_binary_vbow, values_are_binary)
 {
-    auto X_train = make_constant_dataset({0, 64, 128, 192, 255}, 4);
-    ivc::student::BinaryBagOfWords bow(X_train, 2);
-    auto D = bow.transform(X_train);
-
-    for (const auto& row : D)
-        for (float_t v : row)
-            EXPECT_TRUE(v == 0.0f || v == 1.0f)
-                << "Non-binary value: " << v;
-}
-
-TEST(test_binary_vbow, identical_train_test_nonzero)
-{
-    // If we transform the training set, each image must activate at least one vocab word
-    auto X = make_constant_dataset({0, 128, 255}, 4);
+    auto X = make_dataset({0, 64, 128, 192, 255}, 4);
     ivc::student::BinaryBagOfWords bow(X, 2);
     auto D = bow.transform(X);
 
-    for (size_t i = 0; i < D.size(); ++i)
-    {
-        float_t sum = 0.0f;
-        for (float_t v : D[i]) sum += v;
-        EXPECT_GT(sum, 0.0f) << "Image " << i << " has all-zero feature vector";
-    }
+    for (int i = 0; i < D.rows(); ++i)
+        for (int j = 0; j < D.cols(); ++j)
+        {
+            float v = D(i, j);
+            EXPECT_TRUE(v == 0.0f || v == 1.0f) << "Non-binary value: " << v;
+        }
 }
 
-TEST(test_binary_vbow, patch_size_1)
+TEST(test_binary_vbow, train_set_has_nonzero_rows)
 {
-    // Patch size 1 → every pixel becomes a vocab word (values 0-255)
-    auto X_train = make_constant_dataset({10, 20}, 2);
+    auto X = make_dataset({0, 128, 255}, 4);
+    ivc::student::BinaryBagOfWords bow(X, 2);
+    auto D = bow.transform(X);
+
+    for (int i = 0; i < D.rows(); ++i)
+        EXPECT_GT(D.row(i).sum(), 0.0f) << "Row " << i << " is all-zero";
+}
+
+TEST(test_binary_vbow, patch_size_1_vocab_equals_unique_pixels)
+{
+    // patch_size=1: each pixel is its own patch; 2×2 image with values 10,20
+    auto X_train = make_dataset({10, 20}, 2);
     ivc::student::BinaryBagOfWords bow(X_train, 1);
     auto D = bow.transform(X_train);
-    ASSERT_EQ(D.size(), 2u);
-    // Vocab should have exactly 2 unique single-pixel patches
-    EXPECT_EQ(D[0].size(), 2u);
+    // 2 unique pixel values → vocab size = 2
+    EXPECT_EQ(D.cols(), 2);
+    EXPECT_EQ(D.rows(), 2);
 }
 
 // ============================================================
@@ -180,251 +182,287 @@ TEST(test_binary_vbow, patch_size_1)
 
 TEST(test_counting_vbow, output_dimensions)
 {
-    auto X_train = make_constant_dataset({0, 128, 255}, 4);
-    auto X_test  = make_constant_dataset({0, 255},      4);
-
+    auto X_train = make_dataset({0, 128, 255}, 4);
+    auto X_test  = make_dataset({0, 255},      4);
     ivc::student::CountingBagOfWords bow(X_train, 2);
     auto D = bow.transform(X_test);
-
-    ASSERT_EQ(D.size(), 2u);
-    EXPECT_GT(D[0].size(), 0u);
+    EXPECT_EQ(D.rows(), 2);
+    EXPECT_GT(D.cols(), 0);
 }
 
 TEST(test_counting_vbow, counts_are_nonnegative)
 {
-    auto X = make_constant_dataset({0, 128, 255}, 4);
+    auto X = make_dataset({0, 128, 255}, 4);
     ivc::student::CountingBagOfWords bow(X, 2);
     auto D = bow.transform(X);
-
-    for (const auto& row : D)
-        for (float_t v : row)
-            EXPECT_GE(v, 0.0f);
+    for (int i = 0; i < D.rows(); ++i)
+        for (int j = 0; j < D.cols(); ++j)
+            EXPECT_GE(D(i, j), 0.0f);
 }
 
 TEST(test_counting_vbow, counts_geq_binary)
 {
-    // For the same data, counting values should be >= binary values (same positions)
-    auto X = make_constant_dataset({42, 84}, 4);
-
+    auto X = make_dataset({42, 84}, 4);
     ivc::student::BinaryBagOfWords  bow_bin(X, 2);
     ivc::student::CountingBagOfWords bow_cnt(X, 2);
+    auto Db = bow_bin.transform(X);
+    auto Dc = bow_cnt.transform(X);
 
-    auto D_bin = bow_bin.transform(X);
-    auto D_cnt = bow_cnt.transform(X);
-
-    ASSERT_EQ(D_bin.size(), D_cnt.size());
-    for (size_t i = 0; i < D_bin.size(); ++i)
-    {
-        ASSERT_EQ(D_bin[i].size(), D_cnt[i].size());
-        for (size_t j = 0; j < D_bin[i].size(); ++j)
-            EXPECT_GE(D_cnt[i][j], D_bin[i][j]);
-    }
+    ASSERT_EQ(Db.rows(), Dc.rows());
+    ASSERT_EQ(Db.cols(), Dc.cols());
+    for (int i = 0; i < Db.rows(); ++i)
+        for (int j = 0; j < Db.cols(); ++j)
+            EXPECT_GE(Dc(i, j), Db(i, j));
 }
 
-TEST(test_counting_vbow, count_sums_match_patches)
+TEST(test_counting_vbow, row_sum_equals_total_patches)
 {
-    // 4x4 image, patch_size 1 → 16 patches; a constant-fill image has only one
-    // unique patch, so count[unique_pixel] == 16 and all other counts are 0.
-    auto X_train = make_constant_dataset({50, 100}, 4); // two unique pixel values
+    // 2×2 image, patch_size=1 → 4 patches per image, all same pixel value
+    // → one vocab word per unique pixel; count in that word's slot = 4
+    auto X_train = make_dataset({50, 100}, 2);
     ivc::student::CountingBagOfWords bow(X_train, 1);
     auto D = bow.transform(X_train);
-
-    ASSERT_EQ(D.size(), 2u);
-    // Each row should sum to 16 (4*4 patches) since every pixel falls into one bucket
-    for (const auto& row : D)
-    {
-        float_t s = 0.0f;
-        for (float_t v : row) s += v;
-        EXPECT_FLOAT_EQ(s, 16.0f);
-    }
+    for (int i = 0; i < D.rows(); ++i)
+        EXPECT_FLOAT_EQ(D.row(i).sum(), 4.0f);
 }
 
 // ============================================================
 //  OVR Tests
 // ============================================================
 
-TEST(test_ovr, predict_returns_known_label)
+TEST(test_ovr, separable_1d)
 {
-    // Trivial 1D linearly separable problem
-    // Class 0: feature=0, Class 1: feature=1
-    ivc::FloatDataset X_train = {{0.0f}, {0.0f}, {0.0f}, {1.0f}, {1.0f}, {1.0f}};
-    ivc::ProbVector   y_train = {0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f};
+    // Class 0: x=0, class 1: x=1
+    auto X_train = make_float_ds({{0},{0},{0},{1},{1},{1}});
+    auto y_train = make_prob({0,0,0,1,1,1});
 
     ivc::student::OVR ovr;
-    ovr.train(X_train, y_train, 0.1f, 200);
+    ovr.train(X_train, y_train, 0.1f, 300);
 
-    ivc::FloatDataset X_test = {{0.0f}, {1.0f}};
+    auto X_test = make_float_ds({{0},{1}});
     auto y_pred = ovr.predict(X_test);
 
-    ASSERT_EQ(y_pred.size(), 2u);
-    EXPECT_FLOAT_EQ(y_pred[0], 0.0f);
-    EXPECT_FLOAT_EQ(y_pred[1], 1.0f);
+    EXPECT_FLOAT_EQ(y_pred(0), 0.0f);
+    EXPECT_FLOAT_EQ(y_pred(1), 1.0f);
 }
 
-TEST(test_ovr, cost_in_range)
+TEST(test_ovr, cost_in_unit_range)
 {
-    ivc::FloatDataset X = {{0.0f}, {1.0f}, {2.0f}};
-    ivc::ProbVector   y = {0.0f, 1.0f, 2.0f};
-
+    auto X = make_float_ds({{0},{1},{2}});
+    auto y = make_prob({0,1,2});
     ivc::student::OVR ovr;
     ovr.train(X, y, 0.01f, 10);
-
-    float_t c = ovr.cost(X, y);
+    float c = ovr.cost(X, y);
     EXPECT_GE(c, 0.0f);
     EXPECT_LE(c, 1.0f);
 }
 
-TEST(test_ovr, empty_dataset_no_crash)
+TEST(test_ovr, predict_length_matches_input)
+{
+    auto X_train = make_float_ds({{0},{1}});
+    auto y_train = make_prob({0,1});
+    ivc::student::OVR ovr;
+    ovr.train(X_train, y_train, 0.01f, 10);
+
+    auto X_test = make_float_ds({{0},{1},{0},{1},{0}});
+    auto y_pred = ovr.predict(X_test);
+    EXPECT_EQ(y_pred.size(), 5);
+}
+
+TEST(test_ovr, empty_train_no_crash)
 {
     ivc::student::OVR ovr;
-    ivc::FloatDataset X_empty;
-    ivc::ProbVector   y_empty;
-    EXPECT_NO_THROW(ovr.train(X_empty, y_empty, 0.1f, 10));
-    EXPECT_NO_THROW(ovr.predict(X_empty));
+    ivc::FloatDataset Xe(0, 0);
+    ivc::ProbVector   ye(0);
+    EXPECT_NO_THROW(ovr.train(Xe, ye, 0.1f, 10));
+    EXPECT_NO_THROW(ovr.predict(Xe));
 }
 
 // ============================================================
 //  tile_dataset Tests
 // ============================================================
 
-TEST(test_tile, level_0_noop)
+TEST(test_tile, level_0_is_identity)
 {
-    auto X = make_constant_dataset({0, 255}, 4);
+    auto X = make_dataset({0, 255}, 4);
     auto T = ivc::student::tile_dataset(X, 0);
     EXPECT_EQ(T.size(), X.size());
-    for (size_t i = 0; i < X.size(); ++i)
-        EXPECT_EQ(X[i], T[i]);
+    auto itX = X.begin(), itT = T.begin();
+    while (itX != X.end()) { EXPECT_TRUE(itX->isApprox(*itT)); ++itX; ++itT; }
 }
 
 TEST(test_tile, level_1_quadruples_count)
 {
-    auto X = make_constant_dataset({128}, 4);
+    auto X = make_dataset({128}, 4);   // 1 image
     auto T = ivc::student::tile_dataset(X, 1);
-    // 1 image → 4 tiles
-    EXPECT_EQ(T.size(), 4u);
-    // Each tile should be half the side → quarter the pixels
-    EXPECT_EQ(T[0].size(), X[0].size() / 4);
-}
-
-TEST(test_tile, level_1_tile_pixel_count)
-{
-    // 8x8 image tiled at level 1 → 4 tiles of 4x4 = 16 pixels each
-    ivc::GrayscaleByteImg img(64, 1);
-    ivc::ByteDataset X = {img};
-    auto T = ivc::student::tile_dataset(X, 1);
-    ASSERT_EQ(T.size(), 4u);
+    EXPECT_EQ(T.size(), 4u);            // 4 tiles
     for (const auto& tile : T)
-        EXPECT_EQ(tile.size(), 16u);
+    {
+        EXPECT_EQ(tile.rows(), 2);
+        EXPECT_EQ(tile.cols(), 2);
+    }
 }
 
 TEST(test_tile, level_2_produces_16_tiles)
 {
-    // 8x8 → 16 tiles of 2x2 at level 2
-    ivc::GrayscaleByteImg img(64, 1);
-    ivc::ByteDataset X = {img};
+    // 8×8 image → level 2 → 16 tiles of 2×2
+    ivc::GrayscaleByteImg img(8, 8);
+    img.fill(1);
+    ivc::ByteDataset X; X.push_back(img);
     auto T = ivc::student::tile_dataset(X, 2);
     EXPECT_EQ(T.size(), 16u);
+    for (const auto& tile : T) { EXPECT_EQ(tile.rows(), 2); EXPECT_EQ(tile.cols(), 2); }
+}
+
+TEST(test_tile, level_1_pixel_values_preserved)
+{
+    // Build a 4×4 image where the top-left quadrant is all-0, others differ
+    ivc::GrayscaleByteImg img(4, 4);
+    img.block(0,0,2,2).fill(0);
+    img.block(0,2,2,2).fill(64);
+    img.block(2,0,2,2).fill(128);
+    img.block(2,2,2,2).fill(255);
+
+    ivc::ByteDataset X; X.push_back(img);
+    auto T = ivc::student::tile_dataset(X, 1);
+    ASSERT_EQ(T.size(), 4u);
+
+    std::vector<uint8_t> expected_vals = {0, 64, 128, 255};
+    size_t idx = 0;
+    for (const auto& tile : T)
+    {
+        // All pixels in each tile should equal the expected fill value
+        for (int r = 0; r < tile.rows(); ++r)
+            for (int c = 0; c < tile.cols(); ++c)
+                EXPECT_EQ(tile(r, c), expected_vals[idx]);
+        ++idx;
+    }
 }
 
 // ============================================================
 //  HistogramOfGradients Tests
 // ============================================================
 
-TEST(test_hog, output_has_8_bins)
+TEST(test_hog, output_has_8_bins_per_image)
 {
-    auto X = make_constant_dataset({128}, 8);
+    auto X = make_dataset({128}, 8);
     ivc::student::HistogramOfGradients hog;
     auto D = hog.transform(X);
-    ASSERT_EQ(D.size(), 1u);
-    EXPECT_EQ(D[0].size(), 8u);
+    EXPECT_EQ(D.rows(), 1);
+    EXPECT_EQ(D.cols(), 8);
 }
 
-TEST(test_hog, values_normalized)
+TEST(test_hog, hist_sums_to_one_or_zero)
 {
-    // Constant image → zero gradient → hist should be valid (all zero or sum==1)
-    ivc::GrayscaleByteImg img(64, 100);
-    ivc::ByteDataset X = {img};
-
+    // Constant image → zero gradient; hist may be all-zero (sum=0) or
+    // normalised (sum≈1) depending on how sobel_angle handles flat regions.
+    auto X = make_dataset({100}, 8);
     ivc::student::HistogramOfGradients hog;
     auto D = hog.transform(X);
-    ASSERT_EQ(D.size(), 1u);
+    ASSERT_EQ(D.rows(), 1);
+    float s = D.row(0).sum();
+    EXPECT_TRUE(std::abs(s - 1.0f) < 1e-4f || std::abs(s) < 1e-6f)
+        << "Histogram sum = " << s;
+}
 
-    float_t sum = 0.0f;
-    for (float_t v : D[0])
-    {
-        EXPECT_GE(v, 0.0f);
-        sum += v;
-    }
-    // Sum is either 0 (flat image) or ~1 (normalized)
-    EXPECT_TRUE(std::abs(sum - 1.0f) < 1e-4f || std::abs(sum) < 1e-6f);
+TEST(test_hog, all_values_nonnegative)
+{
+    auto X = make_dataset({50, 100, 200}, 8);
+    ivc::student::HistogramOfGradients hog;
+    auto D = hog.transform(X);
+    for (int i = 0; i < D.rows(); ++i)
+        for (int j = 0; j < D.cols(); ++j)
+            EXPECT_GE(D(i, j), 0.0f);
+}
+
+TEST(test_hog, multiple_images_independent_rows)
+{
+    auto X = make_dataset({0, 255}, 8);
+    ivc::student::HistogramOfGradients hog;
+    auto D = hog.transform(X);
+    EXPECT_EQ(D.rows(), 2);
+    EXPECT_EQ(D.cols(), 8);
 }
 
 // ============================================================
 //  balance Tests
 // ============================================================
 
-TEST(test_balance, oversample_equalizes_classes)
+// Helper: count occurrences of each label in a ProbVector
+static std::map<float, int> count_labels(const ivc::ProbVector& y)
 {
-    // 3 samples of class 0, 1 sample of class 1
-    auto X = make_constant_dataset({0, 0, 0, 255}, 4);
-    ivc::ProbVector y = {0.0f, 0.0f, 0.0f, 1.0f};
+    std::map<float, int> counts;
+    for (Eigen::Index i = 0; i < y.size(); ++i)
+        counts[y(i)]++;
+    return counts;
+}
 
-    auto [X_bal, y_bal] = ivc::student::balance(X, y, ivc::student::OVERSAMPLE);
+TEST(test_balance, oversample_equalizes)
+{
+    // 3 of class 0, 1 of class 1
+    auto X = make_dataset({10, 20, 30, 200}, 4);
+    auto y = make_prob({0, 0, 0, 1});
 
-    std::map<float_t, int> counts;
-    for (float_t l : y_bal) counts[l]++;
+    auto [Xb, yb] = ivc::student::balance(X, y, ivc::student::OVERSAMPLE);
+    auto counts = count_labels(yb);
     EXPECT_EQ(counts[0.0f], counts[1.0f]);
+    EXPECT_EQ(static_cast<size_t>(yb.size()), Xb.size());
 }
 
-TEST(test_balance, undersample_equalizes_classes)
+TEST(test_balance, undersample_equalizes)
 {
-    auto X = make_constant_dataset({0, 0, 0, 255}, 4);
-    ivc::ProbVector y = {0.0f, 0.0f, 0.0f, 1.0f};
+    auto X = make_dataset({10, 20, 30, 200}, 4);
+    auto y = make_prob({0, 0, 0, 1});
 
-    auto [X_bal, y_bal] = ivc::student::balance(X, y, ivc::student::UNDERSAMPLE);
-
-    std::map<float_t, int> counts;
-    for (float_t l : y_bal) counts[l]++;
+    auto [Xb, yb] = ivc::student::balance(X, y, ivc::student::UNDERSAMPLE);
+    auto counts = count_labels(yb);
     EXPECT_EQ(counts[0.0f], counts[1.0f]);
+    EXPECT_EQ(static_cast<size_t>(yb.size()), Xb.size());
 }
 
-TEST(test_balance, smote_equalizes_classes)
+TEST(test_balance, smote_equalizes)
 {
-    auto X = make_constant_dataset({10, 20, 30, 200}, 4);
-    ivc::ProbVector y = {0.0f, 0.0f, 0.0f, 1.0f};
+    auto X = make_dataset({10, 20, 30, 200}, 4);
+    auto y = make_prob({0, 0, 0, 1});
 
-    auto [X_bal, y_bal] = ivc::student::balance(X, y, ivc::student::SMOTE);
-
-    std::map<float_t, int> counts;
-    for (float_t l : y_bal) counts[l]++;
+    auto [Xb, yb] = ivc::student::balance(X, y, ivc::student::SMOTE);
+    auto counts = count_labels(yb);
     EXPECT_EQ(counts[0.0f], counts[1.0f]);
+    EXPECT_EQ(static_cast<size_t>(yb.size()), Xb.size());
 }
 
-TEST(test_balance, smote_preserves_label_integrity)
+TEST(test_balance, smote_labels_are_known_classes)
 {
-    // All generated labels must belong to known classes
-    auto X = make_constant_dataset({10, 20, 30, 200}, 4);
-    ivc::ProbVector y = {0.0f, 0.0f, 0.0f, 1.0f};
+    auto X = make_dataset({10, 20, 30, 200}, 4);
+    auto y = make_prob({0, 0, 0, 1});
 
-    auto [X_bal, y_bal] = ivc::student::balance(X, y, ivc::student::SMOTE);
-
-    std::set<float_t> known_classes = {0.0f, 1.0f};
-    for (float_t l : y_bal)
-        EXPECT_TRUE(known_classes.count(l) > 0) << "Unknown label: " << l;
+    auto [Xb, yb] = ivc::student::balance(X, y, ivc::student::SMOTE);
+    for (Eigen::Index i = 0; i < yb.size(); ++i)
+        EXPECT_TRUE(yb(i) == 0.0f || yb(i) == 1.0f) << "Unknown label: " << yb(i);
 }
 
-TEST(test_balance, balance_preserves_pixel_range)
+TEST(test_balance, smote_pixels_in_range)
 {
-    // SMOTE synthetic pixels must stay in [0, 255]
-    auto X = make_constant_dataset({10, 20, 30, 200}, 4);
-    ivc::ProbVector y = {0.0f, 0.0f, 0.0f, 1.0f};
+    auto X = make_dataset({10, 20, 30, 200}, 4);
+    auto y = make_prob({0, 0, 0, 1});
 
-    auto [X_bal, y_bal] = ivc::student::balance(X, y, ivc::student::SMOTE);
+    auto [Xb, yb] = ivc::student::balance(X, y, ivc::student::SMOTE);
+    for (const auto& img : Xb)
+        for (int r = 0; r < img.rows(); ++r)
+            for (int c = 0; c < img.cols(); ++c)
+                EXPECT_LE(static_cast<int>(img(r, c)), 255);
+}
 
-    for (const auto& img : X_bal)
-        for (uint8_t px : img)
-        {
-            EXPECT_GE(static_cast<int>(px), 0);
-            EXPECT_LE(static_cast<int>(px), 255);
-        }
+TEST(test_balance, dataset_size_matches_labels)
+{
+    auto X = make_dataset({0, 0, 0, 255}, 4);
+    auto y = make_prob({0, 0, 0, 1});
+
+    for (auto bt : {ivc::student::OVERSAMPLE,
+                    ivc::student::UNDERSAMPLE,
+                    ivc::student::SMOTE})
+    {
+        auto [Xb, yb] = ivc::student::balance(X, y, bt);
+        EXPECT_EQ(Xb.size(), static_cast<size_t>(yb.size()));
+    }
 }
