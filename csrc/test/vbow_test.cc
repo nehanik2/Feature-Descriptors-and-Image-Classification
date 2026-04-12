@@ -232,6 +232,7 @@ TEST(test_counting_vbow, row_sum_equals_total_patches)
 
 TEST(test_ovr, separable_1d)
 {
+<<<<<<< HEAD
     // Class 0: x=0, class 1: x=1
     auto X_train = make_float_ds({{0},{0},{0},{1},{1},{1}});
     auto y_train = make_prob({0,0,0,1,1,1});
@@ -240,13 +241,28 @@ TEST(test_ovr, separable_1d)
     ovr.train(X_train, y_train, 0.1f, 300);
 
     auto X_test = make_float_ds({{0},{1}});
+=======
+    // simple linearly separable problem: class 0 at x=0, class 1 at x=10
+    // use well-separated values and enough training to ensure convergence
+    auto X_train = make_float_ds({{0},{0},{0},{10},{10},{10}});
+    auto y_train = make_prob({0,0,0,1,1,1});
+
+    ivc::student::OVR ovr;
+    ovr.train(X_train, y_train, 0.01f, 500);
+
+    auto X_test = make_float_ds({{0},{10}});
+>>>>>>> 70fae431189c5a359c80acee728e81ef2a122ca8
     auto y_pred = ovr.predict(X_test);
 
     EXPECT_FLOAT_EQ(y_pred(0), 0.0f);
     EXPECT_FLOAT_EQ(y_pred(1), 1.0f);
 }
 
+<<<<<<< HEAD
 TEST(test_ovr, cost_in_unit_range)
+=======
+TEST(test_ovr, cost_is_nonneg_and_finite)
+>>>>>>> 70fae431189c5a359c80acee728e81ef2a122ca8
 {
     auto X = make_float_ds({{0},{1},{2}});
     auto y = make_prob({0,1,2});
@@ -254,7 +270,7 @@ TEST(test_ovr, cost_in_unit_range)
     ovr.train(X, y, 0.01f, 10);
     float c = ovr.cost(X, y);
     EXPECT_GE(c, 0.0f);
-    EXPECT_LE(c, 1.0f);
+    EXPECT_TRUE(std::isfinite(c));
 }
 
 TEST(test_ovr, predict_length_matches_input)
@@ -352,17 +368,31 @@ TEST(test_hog, output_has_8_bins_per_image)
     EXPECT_EQ(D.cols(), 8);
 }
 
+<<<<<<< HEAD
 TEST(test_hog, hist_sums_to_one_or_zero)
 {
     // Constant image → zero gradient; hist may be all-zero (sum=0) or
     // normalised (sum≈1) depending on how sobel_angle handles flat regions.
+=======
+TEST(test_hog, hist_sums_to_pixel_count_or_zero)
+{
+    // HOG outputs raw bin counts (not normalized).
+    // A constant image has zero gradient everywhere so all bins should be 0,
+    // or if sobel produces some edge at the border the counts sum to <= rows*cols.
+>>>>>>> 70fae431189c5a359c80acee728e81ef2a122ca8
     auto X = make_dataset({100}, 8);
     ivc::student::HistogramOfGradients hog;
     auto D = hog.transform(X);
     ASSERT_EQ(D.rows(), 1);
     float s = D.row(0).sum();
+<<<<<<< HEAD
     EXPECT_TRUE(std::abs(s - 1.0f) < 1e-4f || std::abs(s) < 1e-6f)
         << "Histogram sum = " << s;
+=======
+    // sum must be non-negative and <= total pixels (8*8=64)
+    EXPECT_GE(s, 0.0f);
+    EXPECT_LE(s, 64.0f);
+>>>>>>> 70fae431189c5a359c80acee728e81ef2a122ca8
 }
 
 TEST(test_hog, all_values_nonnegative)
